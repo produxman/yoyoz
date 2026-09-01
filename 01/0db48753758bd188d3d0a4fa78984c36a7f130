@@ -1,0 +1,19 @@
+index.html
+  s_2e16d2ad44482d::t_d4760eb63e05b9 1-556
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "010db48753758bd188d3d0a4fa78984c36a7f130",
+  "prompts": {},
+  "sessions": {
+    "s_2e16d2ad44482d": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "s_2e16d2ad44482d",
+        "model": "unknown"
+      },
+      "human_author": "Produxman <mail@produxman.me>"
+    }
+  }
+}
