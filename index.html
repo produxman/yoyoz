@@ -263,7 +263,7 @@ footer .fine{margin:40px 0 0;font-size:14px;opacity:.6}
       </div>
     </div>
     <div class="fridge" id="fridge" aria-label="the fridge. pick a jar.">
-      <div class="fhead"><span class="t">the fridge</span><span class="c"><b id="leftBig">9</b> of 14 left</span></div>
+      <div class="fhead"><span class="t">the fridge</span><span class="c"><b id="leftBig">–</b> of <span id="totalJars">–</span> left</span></div>
       <div id="shelves"></div>
       <p class="say" id="say" aria-live="polite"></p>
     </div>
@@ -375,17 +375,20 @@ footer .fine{margin:40px 0 0;font-size:14px;opacity:.6}
   </div>
 </div>
 
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 <script>
-/* ---------- data ---------- */
-const FLAVOURS = [
-  {id:'mango', name:'mango', desc:'the first one she ever made. back next week.', price:38, jars:[1,2,3], shot:'photo — mango on a wood board, morning light'},
-  {id:'plain', name:'plain', desc:"it doesn't have a name. it doesn't need one.", price:38, jars:[4,5,6,7], shot:'photo — half-eaten jar on the counter'},
-  {id:'commitment', name:'Commitment Issues', desc:"blueberry and strawberry. she couldn't pick one.", price:45, jars:[8,9,10], shot:'photo — jar at eye level, layers showing'},
-  {id:'berrynice', name:'BerryNice', desc:'strawberry, blueberry, mango. named in four seconds.', price:45, jars:[11,12,13,14], shot:'photo — overhead bowl on linen, one mint leaf'}
-];
-const GONE = new Set([1,2,3,4,5]);      // claimed before you got here
-const mine = new Set();                  // in your basket
-const BATCH = 14;
+/* ---------- supabase ---------- */
+const SUPABASE_URL = 'https://vtwawitowxqwfofkwzio.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_MBCdV-F-zseCVj6k1FnSLg_j4917uxW';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+/* ---------- state ---------- */
+let FLAVOURS = [];        // [{id,name,desc,price,photo_url,shot,jars:[jar_number,...]}]
+let JARS = [];             // raw rows from the jars table, this batch only
+let jarByNumber = {};      // jar_number -> row
+let BATCH_ID = null;
+let BATCH_LABEL = 'this batch';
+const mine = new Set();    // jar numbers picked in this browser, not yet reserved
 const SAY = [
   'pick a jar. any of the filled ones.',
   'one jar. sensible.',
@@ -398,18 +401,96 @@ const SAY = [
   'eight. one left for everyone else.',
   "that's all of them. the pot is yours."
 ];
+// placeholder shot captions until a flavour has a real photo_url
+const CAPTIONS = {
+  mango: 'photo — mango on a wood board, morning light',
+  plain: 'photo — half-eaten jar on the counter',
+  commitment: 'photo — jar at eye level, layers showing',
+  berrynice: 'photo — overhead bowl on linen, one mint leaf'
+};
+
 const money = n => 'SAR ' + n;
 const flavourOf = j => FLAVOURS.find(f => f.jars.includes(j));
-const remaining = () => BATCH - GONE.size - mine.size;
+const isGone = j => { const row = jarByNumber[j]; return !row || row.status !== 'available'; };
+const remaining = () => JARS.filter(j => j.status === 'available').length - mine.size;
 const jarSvg = n => `<svg viewBox="0 0 60 84" aria-hidden="true"><rect class="lid" x="9" y="3" width="42" height="11" rx="3.5"/><rect class="neck" x="13" y="14" width="34" height="7"/><rect class="body" x="7" y="21" width="46" height="60" rx="9"/><circle class="dot" cx="30" cy="52" r="13"/><text x="30" y="57.5" text-anchor="middle">${n}</text></svg>`;
+
+/* ---------- load from supabase ---------- */
+async function loadData(){
+  const shelvesEl = document.getElementById('shelves');
+  shelvesEl.innerHTML = '<p style="opacity:.75;padding:6px 4px">loading the fridge…</p>';
+
+  const { data: batch, error: batchErr } = await sb.from('batches')
+    .select('*').eq('is_active', true).order('id', { ascending:false }).limit(1).maybeSingle();
+  if (batchErr || !batch){
+    shelvesEl.innerHTML = '<p style="padding:6px 4px">the fridge is offline right now — check back shortly.</p>';
+    return;
+  }
+  BATCH_ID = batch.id; BATCH_LABEL = batch.label;
+
+  const [{ data: flavourRows, error: fErr }, { data: jarRows, error: jErr }] = await Promise.all([
+    sb.from('flavours').select('*').order('sort_order'),
+    sb.from('jars').select('*').eq('batch_id', BATCH_ID).order('jar_number')
+  ]);
+  if (fErr || jErr){
+    shelvesEl.innerHTML = '<p style="padding:6px 4px">the fridge is offline right now — check back shortly.</p>';
+    return;
+  }
+
+  applyRows(flavourRows, jarRows);
+  buildFridge(); render();
+
+  document.getElementById('fridge').classList.add('drop');
+  document.querySelectorAll('#shelves .jar').forEach((el,i) => el.style.animationDelay = (i*35)+'ms');
+  setTimeout(() => document.getElementById('fridge').classList.remove('drop'), 1400);
+
+  subscribeRealtime();
+}
+
+function applyRows(flavourRows, jarRows){
+  JARS = jarRows;
+  jarByNumber = Object.fromEntries(jarRows.map(j => [j.jar_number, j]));
+  FLAVOURS = flavourRows.map(f => ({
+    id: f.id, name: f.name, desc: f.description, price: f.price, photo_url: f.photo_url,
+    shot: CAPTIONS[f.id] || 'photo coming soon',
+    jars: jarRows.filter(j => j.flavour_id === f.id).map(j => j.jar_number).sort((a,b) => a-b)
+  }));
+}
+
+async function refreshJars(){
+  const { data, error } = await sb.from('jars').select('*').eq('batch_id', BATCH_ID).order('jar_number');
+  if (error || !data) return;
+  const before = new Set(mine);
+  JARS = data;
+  jarByNumber = Object.fromEntries(data.map(j => [j.jar_number, j]));
+  FLAVOURS.forEach(f => { f.jars = data.filter(j => j.flavour_id === f.id).map(j => j.jar_number).sort((a,b) => a-b); });
+  [...mine].forEach(j => { if (isGone(j)) mine.delete(j); });
+  const takenFromMe = [...before].filter(j => !mine.has(j));
+
+  refreshFridge(); renderCards(); renderCounts(); renderCart();
+
+  if (takenFromMe.length){
+    const say = document.getElementById('say');
+    say.textContent = takenFromMe.length === 1
+      ? `jar ${takenFromMe[0]} just got taken — pick another.`
+      : `jars ${takenFromMe.join(', ')} just got taken — pick another.`;
+    say.classList.add('c');
+  }
+}
+
+function subscribeRealtime(){
+  sb.channel('jars-' + BATCH_ID)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'jars', filter: `batch_id=eq.${BATCH_ID}` }, () => refreshJars())
+    .subscribe();
+}
 
 /* ---------- fridge ---------- */
 const shelves = document.getElementById('shelves');
 function buildFridge(){
   shelves.innerHTML = FLAVOURS.map(f => {
-    const left = f.jars.filter(j => !GONE.has(j)).length;
+    const left = f.jars.filter(j => !isGone(j)).length;
     const jars = f.jars.map(j => {
-      const st = GONE.has(j) ? 'gone' : (mine.has(j) ? 'mine' : 'avail');
+      const st = isGone(j) ? 'gone' : (mine.has(j) ? 'mine' : 'avail');
       const label = `jar ${j}, ${f.name}, ${st==='gone'?'gone':st==='mine'?'in your basket':'available'}`;
       return `<button class="jar ${st}" data-jar="${j}" aria-label="${label}" aria-pressed="${st==='mine'}" ${st==='gone'?'disabled':''}>${jarSvg(j)}</button>`;
     }).join('');
@@ -419,14 +500,20 @@ function buildFridge(){
 function refreshFridge(){
   shelves.querySelectorAll('.jar').forEach(el => {
     const j = +el.dataset.jar;
-    if (GONE.has(j)) return;
+    if (isGone(j)){
+      el.classList.add('gone'); el.classList.remove('avail','mine'); el.disabled = true;
+      el.setAttribute('aria-pressed', false);
+      return;
+    }
     const on = mine.has(j);
+    el.classList.remove('gone'); el.disabled = false;
     el.classList.toggle('mine', on); el.classList.toggle('avail', !on);
     el.setAttribute('aria-pressed', on);
     el.setAttribute('aria-label', `jar ${j}, ${flavourOf(j).name}, ${on?'in your basket':'available'}`);
   });
   shelves.querySelectorAll('.shelf').forEach((sh,i) => {
-    const f = FLAVOURS[i], left = f.jars.filter(j => !GONE.has(j)).length;
+    const f = FLAVOURS[i]; if (!f) return;
+    const left = f.jars.filter(j => !isGone(j)).length;
     sh.querySelector('small').textContent = left ? left+' left' : 'gone';
   });
   const say = document.getElementById('say');
@@ -438,13 +525,16 @@ function refreshFridge(){
 const cards = document.getElementById('cards');
 function renderCards(){
   cards.innerHTML = FLAVOURS.map(f => {
-    const avail = f.jars.filter(j => !GONE.has(j) && !mine.has(j));
+    const avail = f.jars.filter(j => !isGone(j) && !mine.has(j));
     const taken = f.jars.filter(j => mine.has(j)).length;
-    const out = f.jars.every(j => GONE.has(j));
+    const out = f.jars.length > 0 && f.jars.every(j => isGone(j));
     const label = out ? 'gone until friday' : avail.length===0 ? "that's all of them" : taken ? 'add another' : 'add';
     const left = out ? 'gone until friday' : avail.length===0 ? `you have all ${taken}` : `${avail.length} left`;
+    const thumb = f.photo_url
+      ? `<div class="thumb" style="padding:0">${out?'<span class="tag">gone</span>':''}<img src="${f.photo_url}" alt="${f.name}" style="width:100%;height:100%;object-fit:cover;border-radius:11px"></div>`
+      : `<div class="thumb">${out?'<span class="tag">gone</span>':''}<span class="cap">${f.shot}</span></div>`;
     return `<article class="card ${out?'out':''}">
-      <div class="thumb">${out?'<span class="tag">gone</span>':''}<span class="cap">${f.shot}</span></div>
+      ${thumb}
       <h3>${f.name}</h3>
       <p class="desc">${f.desc}</p>
       <div class="foot">
@@ -460,6 +550,7 @@ function renderCounts(){
   const r = remaining();
   document.getElementById('leftBig').textContent = r;
   document.getElementById('leftMob').textContent = r;
+  document.getElementById('totalJars').textContent = JARS.length;
   document.title = `yoyoz — ${r} ${r===1?'jar':'jars'} left`;
   document.getElementById('cartN').textContent = mine.size;
   document.getElementById('openCart').classList.toggle('has', mine.size>0);
@@ -506,7 +597,7 @@ document.addEventListener('click', e => {
   const add = e.target.closest('[data-add]');
   if (add && !add.disabled){
     const f = FLAVOURS.find(x => x.id===add.dataset.add);
-    const next = f.jars.find(j => !GONE.has(j) && !mine.has(j));
+    const next = f.jars.find(j => !isGone(j) && !mine.has(j));
     if (next !== undefined){ mine.add(next); render(); openCart(); }
     return;
   }
@@ -528,28 +619,69 @@ scrim.onclick = closeCart;
 document.addEventListener('keydown', e => { if (e.key==='Escape') closeCart(); });
 
 /* ---------- reserve ---------- */
-function reserve(){
-  const list = [...mine].sort((a,b)=>a-b), n = list.length;
-  const words = n===1 ? `jar ${list[0]} is yours.` : `jars ${list.slice(0,-1).join(', ')} and ${list[n-1]} are yours.`;
-  document.getElementById('doneJars').innerHTML = list.map(j => `<div class="jar mine">${jarSvg(j)}</div>`).join('');
-  document.getElementById('doneLine').textContent = words;
-  const after = BATCH - GONE.size - n;
-  document.getElementById('donePill').textContent = `batch three · ${after} ${after===1?'jar':'jars'} left`;
-  list.forEach(j => GONE.add(j)); mine.clear();
-  closeCart();
-  document.getElementById('done').classList.add('on'); document.body.classList.add('locked');
+async function reserve(){
+  const list = [...mine].sort((a,b) => a-b);
+  if (!list.length) return;
+
+  const btn = document.getElementById('reserve');
+  if (btn){ btn.disabled = true; btn.textContent = 'reserving…'; }
+
+  let total = 0;
+  list.forEach(j => { total += flavourOf(j).price; });
+  total += 15;
+
+  const { data: order, error: orderErr } = await sb.from('orders')
+    .insert({ total, payment_status: 'pending' })
+    .select().single();
+
+  if (orderErr || !order){
+    if (btn){ btn.disabled = false; btn.textContent = `reserve ${list.length===1?'it':'them'}`; }
+    alert("that didn't go through — check your connection and try again.");
+    return;
+  }
+
+  // claim each jar one at a time: only succeeds if it's still available.
+  // this is what stops two people reserving the same jar at once.
+  const won = [], lost = [];
+  for (const j of list){
+    const row = jarByNumber[j];
+    const { data, error } = await sb.from('jars')
+      .update({ status: 'reserved', order_id: order.id })
+      .eq('id', row.id).eq('status', 'available')
+      .select();
+    if (!error && data && data.length) won.push(j); else lost.push(j);
+  }
+  lost.forEach(j => mine.delete(j));
+
+  if (!won.length){
+    await sb.from('orders').delete().eq('id', order.id);
+  } else {
+    const words = won.length===1 ? `jar ${won[0]} is yours.` : `jars ${won.slice(0,-1).join(', ')} and ${won[won.length-1]} are yours.`;
+    document.getElementById('doneJars').innerHTML = won.map(j => `<div class="jar mine">${jarSvg(j)}</div>`).join('');
+    document.getElementById('doneLine').textContent = words;
+    closeCart();
+    document.getElementById('done').classList.add('on'); document.body.classList.add('locked');
+  }
+
+  await refreshJars();
+  document.getElementById('donePill').textContent = `${BATCH_LABEL} · ${remaining()} ${remaining()===1?'jar':'jars'} left`;
+
+  if (lost.length){
+    const msg = lost.length===1
+      ? `jar ${lost[0]} was taken right before you clicked.`
+      : `jars ${lost.join(', ')} were taken right before you clicked.`;
+    alert(won.length ? msg + ' the rest are yours.' : msg + ' pick another.');
+  }
+
+  if (btn){ btn.disabled = false; btn.textContent = `reserve ${mine.size===1?'it':'them'}`; }
 }
 document.getElementById('doneBack').onclick = () => {
   document.getElementById('done').classList.remove('on'); document.body.classList.remove('locked');
-  buildFridge(); render();
   document.getElementById('top').scrollIntoView();
 };
 
 /* ---------- go ---------- */
-buildFridge(); render();
-document.getElementById('fridge').classList.add('drop');
-document.querySelectorAll('#shelves .jar').forEach((el,i) => el.style.animationDelay = (i*35)+'ms');
-setTimeout(() => document.getElementById('fridge').classList.remove('drop'), 1400);
+loadData();
 </script>
 </body>
 </html>
