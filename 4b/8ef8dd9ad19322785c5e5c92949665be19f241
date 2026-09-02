@@ -1,0 +1,25 @@
+index.html
+  h_d51b06b55eff1d 266,378,380-391,404-411,414-415,418-442,446-485,491,493,503-505,507,509,515-516,528,530,533-535,537,553,600,622-676,684
+  s_211e3c3e9ae37a::t_6906109a8b7e75 443-445,486,506,687
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "4b8ef8dd9ad19322785c5e5c92949665be19f241",
+  "prompts": {},
+  "humans": {
+    "h_d51b06b55eff1d": {
+      "author": "Produxman <mail@produxman.me>"
+    }
+  },
+  "sessions": {
+    "s_211e3c3e9ae37a": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "s_211e3c3e9ae37a",
+        "model": "unknown"
+      },
+      "human_author": "Produxman <mail@produxman.me>"
+    }
+  }
+}
