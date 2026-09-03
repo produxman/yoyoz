@@ -1,0 +1,14 @@
+index.html
+  h_d51b06b55eff1d 317
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ade2396298ad4470979fca7031a39bc651dce414",
+  "prompts": {},
+  "humans": {
+    "h_d51b06b55eff1d": {
+      "author": "Produxman <mail@produxman.me>"
+    }
+  }
+}
