@@ -70,6 +70,7 @@ header.top{position:sticky;top:0;z-index:40;background:var(--paper);border-botto
 .hero{background:var(--teal);color:var(--cream);padding:72px 0 80px;overflow:hidden}
 .hero .grid{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center}
 .eyebrow{font-size:14px;opacity:.72;margin:0 0 20px}
+.eyebrow b{font-family:var(--display);font-weight:600}
 .hero h1{font-size:clamp(42px,5.4vw,66px)}
 .hero .sub{font-size:19px;max-width:32ch;margin:22px 0 0;opacity:.86;line-height:1.5}
 .hero .cta{margin-top:34px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
@@ -276,7 +277,7 @@ footer .fine{margin:40px 0 0;font-size:14px;opacity:.6}
 <section class="hero" id="top">
   <div class="wrap grid">
     <div>
-      <p class="eyebrow">batch three · made friday</p>
+      <p class="eyebrow" id="eyebrow">batch three · made friday</p>
       <h1>two ingredients.<br>zero shortcuts.</h1>
       <p class="sub">milk and culture. we'd list them individually but it feels like padding.</p>
       <div class="cta">
@@ -292,13 +293,13 @@ footer .fine{margin:40px 0 0;font-size:14px;opacity:.6}
   </div>
 </section>
 
-<div class="band"><div class="wrap"><p>every jar is numbered. when they're gone they're gone until friday.</p></div></div>
+<div class="band"><div class="wrap"><p>every jar is counted. when they're gone they're gone until friday.</p></div></div>
 
 <section class="pad" id="jars">
   <div class="wrap">
     <div class="sechead">
       <h2>this week's jars</h2>
-      <p class="aside">press add and we'll take the lowest number off the shelf for you. or go back up and pick your own.</p>
+      <p class="aside">press add and we'll take one off the shelf for you. or go back up and pick a flavour yourself.</p>
     </div>
     <div class="cards" id="cards"></div>
   </div>
@@ -432,6 +433,18 @@ const CAPTIONS = {
 };
 
 const money = n => 'SAR ' + n;
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const formatMade = dateStr => {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return `${d}-${MONTHS[m-1]}`;
+};
+function renderEyebrow(batch){
+  const [first, ...rest] = (batch.label || '').split(' ');
+  const labelHtml = rest.length ? `${esc(first)} <b>${esc(rest.join(' '))}</b>` : esc(batch.label || '');
+  const made = formatMade(batch.made_on);
+  document.getElementById('eyebrow').innerHTML = made ? `${labelHtml} · made <b>${made}</b>` : labelHtml;
+}
 const mineQty = fid => mine[fid] || 0;
 const totalMine = () => Object.values(mine).reduce((a,b) => a+b, 0);
 const remaining = () => FLAVOURS.reduce((a,f) => a + Math.max(f.available - mineQty(f.id), 0), 0);
@@ -449,6 +462,7 @@ async function loadData(){
     return;
   }
   BATCH_ID = batch.id; BATCH_LABEL = batch.label;
+  renderEyebrow(batch);
 
   const [{ data: flavourRows, error: fErr }, { data: stockRows, error: sErr }] = await Promise.all([
     sb.from('flavours').select('*').order('sort_order'),
