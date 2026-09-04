@@ -740,6 +740,9 @@ async function reserve(){
     document.getElementById('doneJars').innerHTML =
       won.flatMap(r => Array(r.granted_qty).fill('<div class="jar mine">'+jarSvg()+'</div>')).join('');
     document.getElementById('doneLine').textContent = words;
+    sb.functions.invoke('send-order-confirmation', { body: { order_id: won[0].order_id } })
+      .then(({ error }) => { if (error) console.error('confirmation email failed:', error); })
+      .catch(err => console.error('confirmation email failed:', err));
     const first = contact.name.split(/\s+/)[0].toLowerCase();
     document.querySelector('.done .l2').textContent =
       `saturday morning, ${first}. we'll message you when they're cold.`;
