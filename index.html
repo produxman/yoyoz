@@ -406,12 +406,11 @@ const SUPABASE_KEY = 'sb_publishable_MBCdV-F-zseCVj6k1FnSLg_j4917uxW';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 /* ---------- state ---------- */
-let FLAVOURS = [];        // [{id,name,desc,price,photo_url,shot,jars:[jar_number,...]}]
-let JARS = [];             // raw rows from the jars table, this batch only
-let jarByNumber = {};      // jar_number -> row
+let FLAVOURS = [];        // [{id,name,desc,price,photo_url,shot,total,available}]
+let TOTAL_UNITS = 0;      // sum of quantity_total across flavours, this batch
 let BATCH_ID = null;
 let BATCH_LABEL = 'this batch';
-const mine = new Set();    // jar numbers picked in this browser, not yet reserved
+const mine = {};           // flavour_id -> quantity picked in this browser, not yet reserved
 const contact = { name:'', phone:'', email:'' };  // kept so the drawer doesn't lose typing on re-render
 const esc = v => String(v||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 const SAY = [
@@ -433,10 +432,10 @@ const CAPTIONS = {
 };
 
 const money = n => 'SAR ' + n;
-const flavourOf = j => FLAVOURS.find(f => f.jars.includes(j));
-const isGone = j => { const row = jarByNumber[j]; return !row || row.status !== 'available'; };
-const remaining = () => JARS.filter(j => j.status === 'available').length - mine.size;
-const jarSvg = n => `<svg viewBox="0 0 60 84" aria-hidden="true"><rect class="lid" x="9" y="3" width="42" height="11" rx="3.5"/><rect class="neck" x="13" y="14" width="34" height="7"/><rect class="body" x="7" y="21" width="46" height="60" rx="9"/><circle class="dot" cx="30" cy="52" r="13"/><text x="30" y="57.5" text-anchor="middle">${n}</text></svg>`;
+const mineQty = fid => mine[fid] || 0;
+const totalMine = () => Object.values(mine).reduce((a,b) => a+b, 0);
+const remaining = () => FLAVOURS.reduce((a,f) => a + Math.max(f.available - mineQty(f.id), 0), 0);
+const jarSvg = () => `<svg viewBox="0 0 60 84" aria-hidden="true"><rect class="lid" x="9" y="3" width="42" height="11" rx="3.5"/><rect class="neck" x="13" y="14" width="34" height="7"/><rect class="body" x="7" y="21" width="46" height="60" rx="9"/><circle class="dot" cx="30" cy="52" r="13"/></svg>`;
 
 /* ---------- load from supabase ---------- */
 async function loadData(){
@@ -451,16 +450,16 @@ async function loadData(){
   }
   BATCH_ID = batch.id; BATCH_LABEL = batch.label;
 
-  const [{ data: flavourRows, error: fErr }, { data: jarRows, error: jErr }] = await Promise.all([
+  const [{ data: flavourRows, error: fErr }, { data: stockRows, error: sErr }] = await Promise.all([
     sb.from('flavours').select('*').order('sort_order'),
-    sb.from('jars').select('*').eq('batch_id', BATCH_ID).order('jar_number')
+    sb.from('batch_stock').select('*').eq('batch_id', BATCH_ID)
   ]);
-  if (fErr || jErr){
+  if (fErr || sErr){
     shelvesEl.innerHTML = '<p style="padding:6px 4px">the fridge is offline right now — check back shortly.</p>';
     return;
   }
 
-  applyRows(flavourRows, jarRows);
+  applyRows(flavourRows, stockRows);
   buildFridge(); render();
 
   document.getElementById('fridge').classList.add('drop');
@@ -470,40 +469,48 @@ async function loadData(){
   subscribeRealtime();
 }
 
-function applyRows(flavourRows, jarRows){
-  JARS = jarRows;
-  jarByNumber = Object.fromEntries(jarRows.map(j => [j.jar_number, j]));
-  FLAVOURS = flavourRows.map(f => ({
-    id: f.id, name: f.name, desc: f.description, price: f.price, photo_url: f.photo_url,
-    shot: CAPTIONS[f.id] || 'photo coming soon',
-    jars: jarRows.filter(j => j.flavour_id === f.id).map(j => j.jar_number).sort((a,b) => a-b)
-  }));
+function applyRows(flavourRows, stockRows){
+  const stockByFlavour = Object.fromEntries(stockRows.map(s => [s.flavour_id, s]));
+  FLAVOURS = flavourRows.map(f => {
+    const s = stockByFlavour[f.id] || { quantity_total: 0, quantity_available: 0 };
+    return {
+      id: f.id, name: f.name, desc: f.description, price: f.price, photo_url: f.photo_url,
+      shot: CAPTIONS[f.id] || 'photo coming soon',
+      total: s.quantity_total, available: s.quantity_available
+    };
+  });
+  TOTAL_UNITS = FLAVOURS.reduce((a,f) => a + f.total, 0);
 }
 
-async function refreshJars(){
-  const { data, error } = await sb.from('jars').select('*').eq('batch_id', BATCH_ID).order('jar_number');
+async function refreshStock(){
+  const { data, error } = await sb.from('batch_stock').select('*').eq('batch_id', BATCH_ID);
   if (error || !data) return;
-  const before = new Set(mine);
-  JARS = data;
-  jarByNumber = Object.fromEntries(data.map(j => [j.jar_number, j]));
-  FLAVOURS.forEach(f => { f.jars = data.filter(j => j.flavour_id === f.id).map(j => j.jar_number).sort((a,b) => a-b); });
-  [...mine].forEach(j => { if (isGone(j)) mine.delete(j); });
-  const takenFromMe = [...before].filter(j => !mine.has(j));
+  const stockByFlavour = Object.fromEntries(data.map(s => [s.flavour_id, s]));
+  const takenFromMe = [];
+
+  FLAVOURS.forEach(f => {
+    const s = stockByFlavour[f.id] || { quantity_total: 0, quantity_available: 0 };
+    f.total = s.quantity_total; f.available = s.quantity_available;
+    const have = mineQty(f.id);
+    if (have > f.available){
+      const lost = have - f.available;
+      if (f.available > 0) mine[f.id] = f.available; else delete mine[f.id];
+      takenFromMe.push(`${lost} × ${f.name}`);
+    }
+  });
 
   refreshFridge(); renderCards(); renderCounts(); renderCart();
 
   if (takenFromMe.length){
     const say = document.getElementById('say');
-    say.textContent = takenFromMe.length === 1
-      ? `jar ${takenFromMe[0]} just got taken — pick another.`
-      : `jars ${takenFromMe.join(', ')} just got taken — pick another.`;
+    say.textContent = `${takenFromMe.join(', ')} just got taken — pick another.`;
     say.classList.add('c');
   }
 }
 
 function subscribeRealtime(){
-  sb.channel('jars-' + BATCH_ID)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'jars', filter: `batch_id=eq.${BATCH_ID}` }, () => refreshJars())
+  sb.channel('stock-' + BATCH_ID)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'batch_stock', filter: `batch_id=eq.${BATCH_ID}` }, () => refreshStock())
     .subscribe();
 }
 
@@ -511,48 +518,35 @@ function subscribeRealtime(){
 const shelves = document.getElementById('shelves');
 function buildFridge(){
   shelves.innerHTML = FLAVOURS.map(f => {
-    const left = f.jars.filter(j => !isGone(j)).length;
-    const jars = f.jars.map(j => {
-      const st = isGone(j) ? 'gone' : (mine.has(j) ? 'mine' : 'avail');
-      const label = `jar ${j}, ${f.name}, ${st==='gone'?'gone':st==='mine'?'in your basket':'available'}`;
-      return `<button class="jar ${st}" data-jar="${j}" aria-label="${label}" aria-pressed="${st==='mine'}" ${st==='gone'?'disabled':''}>${jarSvg(j)}</button>`;
-    }).join('');
-    return `<div class="shelf"><div class="lbl">${f.name}<small>${left ? left+' left' : 'gone'}</small></div><div class="jars-row">${jars}</div></div>`;
+    const goneN = Math.max(f.total - f.available, 0);
+    const mineN = mineQty(f.id);
+    const availN = Math.max(f.available - mineN, 0);
+    const left = mineN + availN;
+    const icons = Array(goneN).fill('gone').concat(Array(mineN).fill('mine')).concat(Array(availN).fill('avail'))
+      .map(st => {
+        const label = `${f.name} jar, ${st==='gone'?'gone':st==='mine'?'in your basket':'available'}`;
+        return `<button class="jar ${st}" data-flavour="${f.id}" aria-label="${label}" aria-pressed="${st==='mine'}" ${st==='gone'?'disabled':''}>${jarSvg()}</button>`;
+      }).join('');
+    return `<div class="shelf"><div class="lbl">${f.name}<small>${left ? left+' left' : 'gone'}</small></div><div class="jars-row">${icons}</div></div>`;
   }).join('');
 }
 function refreshFridge(){
-  shelves.querySelectorAll('.jar').forEach(el => {
-    const j = +el.dataset.jar;
-    if (isGone(j)){
-      el.classList.add('gone'); el.classList.remove('avail','mine'); el.disabled = true;
-      el.setAttribute('aria-pressed', false);
-      return;
-    }
-    const on = mine.has(j);
-    el.classList.remove('gone'); el.disabled = false;
-    el.classList.toggle('mine', on); el.classList.toggle('avail', !on);
-    el.setAttribute('aria-pressed', on);
-    el.setAttribute('aria-label', `jar ${j}, ${flavourOf(j).name}, ${on?'in your basket':'available'}`);
-  });
-  shelves.querySelectorAll('.shelf').forEach((sh,i) => {
-    const f = FLAVOURS[i]; if (!f) return;
-    const left = f.jars.filter(j => !isGone(j)).length;
-    sh.querySelector('small').textContent = left ? left+' left' : 'gone';
-  });
+  buildFridge();
   const say = document.getElementById('say');
-  say.textContent = SAY[Math.min(mine.size, SAY.length-1)];
-  say.classList.toggle('c', mine.size >= 4);
+  const n = totalMine();
+  say.textContent = SAY[Math.min(n, SAY.length-1)];
+  say.classList.toggle('c', n >= 4);
 }
 
 /* ---------- cards ---------- */
 const cards = document.getElementById('cards');
 function renderCards(){
   cards.innerHTML = FLAVOURS.map(f => {
-    const avail = f.jars.filter(j => !isGone(j) && !mine.has(j));
-    const taken = f.jars.filter(j => mine.has(j)).length;
-    const out = f.jars.length > 0 && f.jars.every(j => isGone(j));
-    const label = out ? 'gone until friday' : avail.length===0 ? "that's all of them" : taken ? 'add another' : 'add';
-    const left = out ? 'gone until friday' : avail.length===0 ? `you have all ${taken}` : `${avail.length} left`;
+    const mineN = mineQty(f.id);
+    const availN = Math.max(f.available - mineN, 0);
+    const out = f.total > 0 && f.available === 0;
+    const label = out ? 'gone until friday' : availN===0 ? "that's all of them" : mineN ? 'add another' : 'add';
+    const left = out ? 'gone until friday' : availN===0 ? `you have all ${mineN}` : `${availN} left`;
     const thumb = f.photo_url
       ? `<div class="thumb" style="padding:0">${out?'<span class="tag">gone</span>':''}<img src="${f.photo_url}" alt="${f.name}" style="width:100%;height:100%;object-fit:cover;border-radius:11px"></div>`
       : `<div class="thumb">${out?'<span class="tag">gone</span>':''}<span class="cap">${f.shot}</span></div>`;
@@ -563,7 +557,7 @@ function renderCards(){
       <div class="foot">
         <div class="price">${money(f.price)}</div>
         <div class="left">${left}</div>
-        <button class="btn btn-teal w" data-add="${f.id}" ${(out||!avail.length)?'disabled':''}>${label}</button>
+        <button class="btn btn-teal w" data-add="${f.id}" ${(out||!availN)?'disabled':''}>${label}</button>
       </div></article>`;
   }).join('');
 }
@@ -573,35 +567,36 @@ function renderCounts(){
   const r = remaining();
   document.getElementById('leftBig').textContent = r;
   document.getElementById('leftMob').textContent = r;
-  document.getElementById('totalJars').textContent = JARS.length;
+  document.getElementById('totalJars').textContent = TOTAL_UNITS;
   document.title = `yoyoz — ${r} ${r===1?'jar':'jars'} left`;
-  document.getElementById('cartN').textContent = mine.size;
-  document.getElementById('openCart').classList.toggle('has', mine.size>0);
+  const n = totalMine();
+  document.getElementById('cartN').textContent = n;
+  document.getElementById('openCart').classList.toggle('has', n>0);
 }
 
 /* ---------- cart ---------- */
 function renderCart(){
   const body = document.getElementById('dbody'), foot = document.getElementById('dfoot');
-  const list = [...mine].sort((a,b)=>a-b);
-  if (!list.length){
+  const entries = Object.entries(mine).filter(([,q]) => q > 0);
+  if (!entries.length){
     body.innerHTML = '<div class="empty"><p>nothing in here yet.</p><button class="btn btn-line" id="goShop">go to the fridge</button></div>';
     foot.innerHTML = '';
     document.getElementById('goShop').onclick = () => { closeCart(); document.getElementById('top').scrollIntoView(); };
     return;
   }
   let sub = 0;
-  body.innerHTML = list.map(j => {
-    const f = flavourOf(j); sub += f.price;
-    return `<div class="line"><div class="mini">${jarSvg(j)}</div>
-      <div><div class="nm">jar ${j} · ${f.name}</div><div class="pr">${money(f.price)}</div></div>
-      <button class="rm" data-back="${j}">put it back</button></div>`;
+  body.innerHTML = entries.map(([fid, qty]) => {
+    const f = FLAVOURS.find(x => x.id===fid); sub += f.price*qty;
+    return `<div class="line"><div class="mini">${jarSvg()}</div>
+      <div><div class="nm">${f.name} × ${qty}</div><div class="pr">${money(f.price)} each</div></div>
+      <button class="rm" data-back="${fid}">put one back</button></div>`;
   }).join('');
-  const n = list.length;
+  const n = totalMine();
   foot.innerHTML = `
     <div class="row"><span>subtotal</span><span>${money(sub)}</span></div>
     <div class="row"><span>saturday delivery</span><span>${money(15)}</span></div>
     <div class="row total"><span>total</span><span>${money(sub+15)}</span></div>
-    <p class="share">you're taking ${n} of the ${JARS.length}.</p>
+    <p class="share">you're taking ${n} of the ${TOTAL_UNITS}.</p>
     <div class="who">
       <p class="wq">who are we saving ${n===1?'it':'them'} for?</p>
       <input id="cName"  type="text"  autocomplete="name"  placeholder="name" value="${esc(contact.name)}">
@@ -623,23 +618,32 @@ function renderCart(){
 
 function render(){ refreshFridge(); renderCards(); renderCounts(); renderCart(); }
 
+/* ---------- helpers ---------- */
+function addOne(fid){
+  const f = FLAVOURS.find(x => x.id===fid); if (!f) return;
+  if (mineQty(fid) >= f.available) return;
+  mine[fid] = mineQty(fid) + 1;
+}
+function removeOne(fid){
+  const left = mineQty(fid) - 1;
+  if (left <= 0) delete mine[fid]; else mine[fid] = left;
+}
+
 /* ---------- interactions ---------- */
 document.addEventListener('click', e => {
-  const jar = e.target.closest('[data-jar]');
+  const jar = e.target.closest('.jar[data-flavour]');
   if (jar && !jar.disabled && !jar.closest('.done')){
-    const j = +jar.dataset.jar;
-    mine.has(j) ? mine.delete(j) : mine.add(j);
+    const fid = jar.dataset.flavour;
+    jar.classList.contains('mine') ? removeOne(fid) : addOne(fid);
     render(); return;
   }
   const add = e.target.closest('[data-add]');
   if (add && !add.disabled){
-    const f = FLAVOURS.find(x => x.id===add.dataset.add);
-    const next = f.jars.find(j => !isGone(j) && !mine.has(j));
-    if (next !== undefined){ mine.add(next); render(); openCart(); }
+    addOne(add.dataset.add); render(); openCart();
     return;
   }
   const back = e.target.closest('[data-back]');
-  if (back){ mine.delete(+back.dataset.back); render(); return; }
+  if (back){ removeOne(back.dataset.back); render(); return; }
   const vote = e.target.closest('[data-vote]');
   if (vote){
     document.querySelectorAll('[data-vote]').forEach(b => b.classList.toggle('picked', b===vote));
@@ -657,8 +661,8 @@ document.addEventListener('keydown', e => { if (e.key==='Escape') closeCart(); }
 
 /* ---------- reserve ---------- */
 async function reserve(){
-  const list = [...mine].sort((a,b) => a-b);
-  if (!list.length) return;
+  const entries = Object.entries(mine).filter(([,q]) => q > 0);
+  if (!entries.length) return;
 
   const btn = document.getElementById('reserve');
   const errEl = document.getElementById('cErr');
@@ -688,33 +692,39 @@ async function reserve(){
 
   if (btn){ btn.disabled = true; btn.textContent = 'reserving…'; }
 
-  // one call, one transaction. the database claims whatever is still
-  // available and tells us which jar numbers we actually got.
-  const ids = list.map(j => jarByNumber[j].id);
-  const { data, error } = await sb.rpc('reserve_jars', {
-    p_jar_ids: ids,
-    p_name:    contact.name,
-    p_phone:   contact.phone,
-    p_email:   contact.email
+  // one call, one transaction. the database claims whatever quantity is
+  // still available per flavour and tells us how much we actually got.
+  const requested = Object.fromEntries(entries);
+  const items = entries.map(([flavour_id, quantity]) => ({ flavour_id, quantity }));
+  const { data, error } = await sb.rpc('place_order', {
+    p_items:  items,
+    p_name:   contact.name,
+    p_phone:  contact.phone,
+    p_email:  contact.email
   });
 
   if (error){
-    console.error('reserve_jars failed:', error);
-    if (btn){ btn.disabled = false; btn.textContent = `reserve ${list.length===1?'it':'them'}`; }
+    console.error('place_order failed:', error);
+    if (btn){ btn.disabled = false; btn.textContent = `reserve ${totalMine()===1?'it':'them'}`; }
     errEl.textContent = "that didn't go through — try again in a moment.";
     return;
   }
 
-  const won = (data || []).map(r => r.jar_number).sort((a,b) => a-b);
-  const lost = list.filter(j => !won.includes(j));
-  lost.forEach(j => mine.delete(j));
+  const rows = data || [];
+  const won = rows.filter(r => r.granted_qty > 0);
+  const short = rows.filter(r => r.granted_qty < (requested[r.flavour_id] || 0));
+
+  // cart clears after every attempt, win or lose
+  entries.forEach(([fid]) => delete mine[fid]);
 
   if (won.length){
-    won.forEach(j => mine.delete(j));
-    const words = won.length===1
-      ? `jar ${won[0]} is yours.`
-      : `jars ${won.slice(0,-1).join(', ')} and ${won[won.length-1]} are yours.`;
-    document.getElementById('doneJars').innerHTML = won.map(j => `<div class="jar mine">${jarSvg(j)}</div>`).join('');
+    const wonTotal = won.reduce((a,r) => a + r.granted_qty, 0);
+    const parts = won.map(r => `${r.granted_qty} × ${FLAVOURS.find(f => f.id===r.flavour_id).name}`);
+    const words = parts.length <= 1
+      ? `${parts[0]} ${wonTotal===1?'is':'are'} yours.`
+      : `${parts.slice(0,-1).join(', ')} and ${parts[parts.length-1]} are yours.`;
+    document.getElementById('doneJars').innerHTML =
+      won.flatMap(r => Array(r.granted_qty).fill('<div class="jar mine">'+jarSvg()+'</div>')).join('');
     document.getElementById('doneLine').textContent = words;
     const first = contact.name.split(/\s+/)[0].toLowerCase();
     document.querySelector('.done .l2').textContent =
@@ -724,17 +734,20 @@ async function reserve(){
     document.getElementById('done').classList.add('on'); document.body.classList.add('locked');
   }
 
-  await refreshJars();
+  await refreshStock();
   document.getElementById('donePill').textContent = `${BATCH_LABEL} · ${remaining()} ${remaining()===1?'jar':'jars'} left`;
 
-  if (lost.length){
-    const msg = lost.length===1
-      ? `jar ${lost[0]} was taken right before you clicked.`
-      : `jars ${lost.join(', ')} were taken right before you clicked.`;
+  if (short.length){
+    const msgs = short.map(r => {
+      const f = FLAVOURS.find(x => x.id===r.flavour_id);
+      const lostQty = (requested[r.flavour_id] || 0) - r.granted_qty;
+      return `${lostQty} × ${f.name}`;
+    });
+    const msg = `${msgs.join(', ')} sold out right before you clicked.`;
     alert(won.length ? msg + ' the rest are yours.' : msg + ' pick another.');
   }
 
-  if (btn){ btn.disabled = false; btn.textContent = `reserve ${mine.size===1?'it':'them'}`; }
+  if (btn){ btn.disabled = false; btn.textContent = `reserve ${totalMine()===1?'it':'them'}`; }
 }
 document.getElementById('doneBack').onclick = () => {
   document.getElementById('done').classList.remove('on'); document.body.classList.remove('locked');
